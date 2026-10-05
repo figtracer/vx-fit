@@ -1,0 +1,10 @@
+{
+ "gpu": "T4",
+ "nvidia_smi": "Tesla T4, 15360, 610.57.04",
+ "smi_total_bytes": 16106127360,
+ "cuda_total_bytes": 15645278208,
+ "free_after_context_bytes": 15535308800,
+ "largest_single_bytes": 15531507712,
+ "fillable_bytes": 15531507712,
+ "free_after_fill_bytes": 3801088
+}

@@ -1,0 +1,10 @@
+{
+ "gpu": "A100-40GB",
+ "nvidia_smi": "NVIDIA A100-SXM4-40GB, 40960, 580.95.05",
+ "smi_total_bytes": 42949672960,
+ "cuda_total_bytes": 42405855232,
+ "free_after_context_bytes": 41960407040,
+ "largest_single_bytes": 41959817216,
+ "fillable_bytes": 41959817216,
+ "free_after_fill_bytes": 589824
+}

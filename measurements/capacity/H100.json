@@ -1,0 +1,10 @@
+{
+ "gpu": "H100",
+ "nvidia_smi": "NVIDIA H100 80GB HBM3, 81559, 580.95.05",
+ "smi_total_bytes": 85520809984,
+ "cuda_total_bytes": 85017624576,
+ "free_after_context_bytes": 84465090560,
+ "largest_single_bytes": 84460699648,
+ "fillable_bytes": 84460699648,
+ "free_after_fill_bytes": 4390912
+}

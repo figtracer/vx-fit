@@ -1,0 +1,10 @@
+{
+ "gpu": "H200",
+ "nvidia_smi": "NVIDIA H200, 143771, 580.95.05",
+ "smi_total_bytes": 150754820096,
+ "cuda_total_bytes": 150110011392,
+ "free_after_context_bytes": 149557477376,
+ "largest_single_bytes": 149554200576,
+ "fillable_bytes": 149554200576,
+ "free_after_fill_bytes": 3276800
+}

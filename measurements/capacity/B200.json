@@ -1,0 +1,10 @@
+{
+ "gpu": "B200",
+ "nvidia_smi": "NVIDIA B200, 183359, 580.95.05",
+ "smi_total_bytes": 192265846784,
+ "cuda_total_bytes": 191503138816,
+ "free_after_context_bytes": 190845222912,
+ "largest_single_bytes": 190800986112,
+ "fillable_bytes": 190800986112,
+ "free_after_fill_bytes": 44236800
+}

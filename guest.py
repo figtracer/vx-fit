@@ -7,6 +7,7 @@ parser.add_argument('gpu')
 parser.add_argument('models', nargs='+')
 parser.add_argument('--utils', nargs='+', type=float, default=[0.9])  # vLLM gpu_memory_utilization; 0.9 is its default.
 parser.add_argument('--tag', default='')
+parser.add_argument('--skip-native', action='store_true')  # repeats only: no 32k-prompt launches
 parser.add_argument('--attention-backend', default='')  # Blackwell's default FlashInfer backend JIT-compiles with nvcc.
 args = parser.parse_args()
 out = Path('/workspace/out'); out.mkdir(parents=True, exist_ok=True)
@@ -74,7 +75,7 @@ for model in args.models:
     entry = {'download_seconds': round(time.time() - start, 1), 'idle_smi': smi(), 'launches': []}
     for util in args.utils:
         entry['launches'].append(launch(model, SHORT, util))
-    if entry['launches'][0].get('kv_tokens', 0) < NATIVE:
+    if not args.skip_native and entry['launches'][0].get('kv_tokens', 0) < NATIVE:
         # Boundary model: try the native context with a full-length prompt wherever the short launch loaded.
         for short in list(entry['launches']):
             if short['loaded']:

@@ -1,0 +1,6 @@
+
+[notice] A new release of pip is available: 25.0.1 -> 26.2.1
+[notice] To update, run: pip install --upgrade pip
+{"max_model_len": 4096, "util": 0.9, "long_prompt": false, "loaded": true, "kv_tokens": 19264.0, "seconds": 139.8}
+{"max_model_len": 4096, "util": 0.9, "long_prompt": false, "loaded": true, "kv_tokens": 19264.0, "seconds": 75.4}
+{"max_model_len": 4096, "util": 0.9, "long_prompt": false, "loaded": true, "kv_tokens": 19264.0, "seconds": 74.5}
