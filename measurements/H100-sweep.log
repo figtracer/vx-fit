@@ -1,0 +1,19 @@
+
+[notice] A new release of pip is available: 25.0.1 -> 26.2.1
+[notice] To update, run: pip install --upgrade pip
+{"max_model_len": 4096, "util": 0.9, "long_prompt": false, "loaded": true, "kv_tokens": 995152.0, "seconds": 79.4}
+{"max_model_len": 4096, "util": 0.95, "long_prompt": false, "loaded": true, "kv_tokens": 1069616.0, "seconds": 54.0}
+{"max_model_len": 4096, "util": 0.98, "long_prompt": false, "loaded": true, "kv_tokens": 1114096.0, "seconds": 40.1}
+{"max_model_len": 4096, "util": 0.99, "long_prompt": false, "loaded": true, "kv_tokens": 1128928.0, "seconds": 41.0}
+{"max_model_len": 4096, "util": 0.9, "long_prompt": false, "loaded": true, "kv_tokens": 216288.0, "seconds": 83.1}
+{"max_model_len": 4096, "util": 0.95, "long_prompt": false, "loaded": true, "kv_tokens": 237904.0, "seconds": 47.5}
+{"max_model_len": 4096, "util": 0.98, "long_prompt": false, "loaded": true, "kv_tokens": 250880.0, "seconds": 46.6}
+{"max_model_len": 4096, "util": 0.99, "long_prompt": false, "loaded": true, "kv_tokens": 255200.0, "seconds": 46.1}
+{"max_model_len": 4096, "util": 0.9, "long_prompt": false, "loaded": true, "kv_tokens": 19264.0, "seconds": 109.7}
+{"max_model_len": 4096, "util": 0.95, "long_prompt": false, "loaded": true, "kv_tokens": 35472.0, "seconds": 70.1}
+{"max_model_len": 4096, "util": 0.98, "long_prompt": false, "loaded": true, "kv_tokens": 45200.0, "seconds": 66.6}
+{"max_model_len": 4096, "util": 0.99, "long_prompt": false, "loaded": true, "kv_tokens": 48448.0, "seconds": 68.9}
+{"max_model_len": 32768, "util": 0.9, "long_prompt": true, "loaded": false, "kv_tokens": null, "seconds": 79.1}
+{"max_model_len": 32768, "util": 0.95, "long_prompt": true, "loaded": true, "kv_tokens": 35472.0, "seconds": 84.6}
+{"max_model_len": 32768, "util": 0.98, "long_prompt": true, "loaded": false, "kv_tokens": 45200.0, "seconds": 72.3}
+{"max_model_len": 32768, "util": 0.99, "long_prompt": true, "loaded": false, "kv_tokens": 48448.0, "seconds": 66.5}

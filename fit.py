@@ -1,12 +1,12 @@
 """Compare Vx admission verdicts with what vLLM actually fits on rented GPUs."""
-import argparse, json, math, subprocess, sys, time, urllib.request
+import argparse, json, math, re, subprocess, sys, time, urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-MODELS = ['Qwen/Qwen2.5-7B-Instruct', 'Qwen/Qwen2.5-14B-Instruct', 'Qwen/Qwen2.5-32B-Instruct']
-MACHINES = {'H100': 'fleet/h100-sxm.vx', 'A100-80GB': 'fleet/a100-80.vx'}
+MODELS = ['Qwen/Qwen2.5-7B-Instruct', 'Qwen/Qwen2.5-14B-Instruct', 'Qwen/Qwen2.5-32B-Instruct', 'Qwen/Qwen2.5-72B-Instruct']
+MACHINES = {'H100': 'fleet/h100-sxm.vx', 'A100-80GB': 'fleet/a100-80.vx', 'H200': 'fleet/h200.vx', 'B200': 'fleet/b200.vx'}
 CONTEXTS, BATCHES = [4096, 8192, 16384, 32768], [1, 4, 16, 64]
-VLLM = '0.31.0'
+VLLM, DEFAULT_UTIL = '0.31.0', 0.9
 
 
 def fission(*args, check=True):
@@ -24,6 +24,7 @@ def measure(args):
     print(json.dumps({k: plan.get(k) for k in ['id', 'body', 'creationQuote', 'totalCap']}))
     if not args.approve:
         return print('Preview only; repeat with --approve to pay.')
+    output = f'{args.gpu}{args.tag}'
     try:
         state = fission('open', name, '--plan', plan['id'], '--approve')
         if not (state.get('guestGpu') or {}).get('verified'):
@@ -33,13 +34,14 @@ def measure(args):
         fission('upload', name, str(ROOT / 'guest.py'), '/workspace/guest.py')
         fission('run', name, 'fit', '--duration', args.work, '--', 'sh', '-c',
                 'command -v cc >/dev/null || (apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gcc g++ >/dev/null); '
-                f'pip install -q vllm=={VLLM} && python3 /workspace/guest.py "$0" "$@"', args.gpu, *args.models)
+                f'pip install -q vllm=={VLLM} && python3 /workspace/guest.py "$@"', 'guest', args.gpu, *args.models,
+                '--utils', *map(str, args.utils), f'--tag={args.tag}', f'--attention-backend={args.attention_backend}')
         job = fission('wait', name, 'fit', '--duration', args.work, '--max-spend', '0.05', check=False)
         print(json.dumps(job if isinstance(job, str) else {k: job.get(k) for k in ['phase', 'waitingStopped']}))
         target = ROOT / 'measurements'
         target.mkdir(exist_ok=True)
-        for remote, local in [(f'/workspace/out/{args.gpu}.json', f'{args.gpu}.json'),
-                              ('/workspace/.fission/jobs/fit/output.log', f'{args.gpu}.log')]:
+        for remote, local in [(f'/workspace/out/{output}.json', f'{output}.json'),
+                              ('/workspace/.fission/jobs/fit/output.log', f'{output}.log')]:
             (target / local).unlink(missing_ok=True)
             fission('download', name, remote, str(target / local), check=False)
     finally:
@@ -62,11 +64,17 @@ def shape(model):
             'weight_bytes': index['metadata']['total_size']}
 
 
-def exact_program(s, context, batch):
-    # Same three residents as fleet/admit.vx, with weights taken from the real checkpoint size.
-    rows = math.ceil(s['weight_bytes'] / 2 / s['d'])
-    tensors = [('weights', [rows, s['d']]), ('kv_cache', [2 * s['layers'] * batch * context, s['kv_heads'] * s['head_dim']]),
+def residents(s, context, batch, reserve=0):
+    # The three residents of fleet/admit.vx, sized from the real checkpoint, plus an optional engine reserve.
+    tensors = [('weights', [math.ceil(s['weight_bytes'] / 2 / s['d']), s['d']]),
+               ('kv_cache', [2 * s['layers'] * batch * context, s['kv_heads'] * s['head_dim']]),
                ('activations', [batch * context, s['d']])]
+    if reserve:
+        tensors.append(('engine_reserve', [math.ceil(reserve / 2 / 4096), 4096]))
+    return tensors
+
+
+def exact_program(tensors):
     lines = ['fn main() -> i32 {']
     for name, (a, b) in tensors:
         lines += [f'  let {name}_host : Tensor<f16, [{a}, {b}]> = Tensor<f16>([{a}, {b}]);',
@@ -82,74 +90,129 @@ def reference_program(vx, s, context, batch):
     return source.replace(call, f"return admit<{s['layers']}, {s['heads']}, {s['kv_heads']}, {s['head_dim']}, {context}, {batch}, 1>();")
 
 
+def machine_file(vx, machine, capacity, path):
+    # A recorded copy of the fleet file. Optionally replace the HBM capacity; always restore the
+    # HBM -> CPU_DRAM edge some fleet files omit (h200.vx), which admit.vx needs to read results back.
+    source = (vx / machine).read_text()
+    if capacity is not None:
+        source, count = re.subn(r'(Memory HBM \{\s*capacity: )[^,]+,', rf'\g<1>{capacity} B,', source)
+        assert count == 1, f'{machine}: HBM capacity not found'
+    patched = 'Memory::HBM -> Memory::CPU_DRAM' not in source
+    if patched:
+        edge = re.search(r'\n(\s*)transfer Memory::CPU_DRAM -> Memory::HBM : ([^,]+),', source)
+        source = source.replace(edge.group(0), edge.group(0) + f'\n{edge.group(1)}transfer Memory::HBM -> Memory::CPU_DRAM : {edge.group(2)},')
+    path.write_text(source)
+    return path, patched
+
+
 def admit(vx, machine, source, path):
     path.write_text(source)
     diagnostics = path.with_suffix('.json')
     diagnostics.unlink(missing_ok=True)
-    run = subprocess.run([str(vx / 'target/debug/vxc'), '--machine', str(vx / machine), '--host', str(vx / 'fleet/host-x86-e5-2666v3.vx'),
+    run = subprocess.run([str(vx / 'target/debug/vxc'), '--machine', str(machine), '--host', str(vx / 'fleet/host-x86-e5-2666v3.vx'),
                           str(path), '--action', 'emit-mlir', '--diagnostics-json', str(diagnostics)], capture_output=True, text=True)
     record = json.loads(diagnostics.read_text())
     if record['verdict'] not in ['admitted', 'rejected'] or (run.returncode == 0) != (record['verdict'] == 'admitted'):
         raise RuntimeError(f'{path.name}: {run.stderr[-2000:]}')
-    required = [d['capacity']['required_bytes'] for d in record['diagnostics'] if d.get('capacity')]
-    required += [r['total_bytes'] for r in record.get('resident_sets', []) if r['space'] == 'HBM']
     if record['verdict'] == 'rejected' and not any(d['code'] in ['E6009', 'E6010'] for d in record['diagnostics']):
         raise RuntimeError(f'{path.name} rejected for a reason other than capacity: {record["diagnostics"]}')
-    return record['verdict'] == 'admitted', max(required)
+    resident = [r['total_bytes'] for r in record.get('resident_sets', []) if r['space'] == 'HBM']
+    return record['verdict'] == 'admitted', max(resident, default=None)
+
+
+def launches(gpu):
+    # Earlier baseline files and later sweep files for one GPU, merged per model.
+    merged = {}
+    for path in sorted((ROOT / 'measurements').glob(f'{gpu}*.json')):
+        report = json.loads(path.read_text())
+        if report.get('gpu') != gpu:
+            continue
+        for model, entry in report['models'].items():
+            smi_bytes = int(report['nvidia_smi'].split(',')[1]) * 2**20
+            merged.setdefault(model, []).extend({**l, 'util': l.get('util', DEFAULT_UTIL), 'file': path.name, 'smi_bytes': smi_bytes}
+                                                for l in entry['launches'])
+    return merged
+
+
+def fits(runs, context, batch, native):
+    # A configuration fits only if it fitted in every repeated vLLM start at that utilization.
+    return bool(runs) and context <= native and all(l['loaded'] and batch * context <= l.get('kv_tokens', 0) for l in runs)
 
 
 def table(args):
     vx = Path(args.vx).resolve()
     out = ROOT / 'results'
-    (out / 'vx').mkdir(parents=True, exist_ok=True)
-    shapes = {model: shape(model) for model in MODELS}
-    cells, summary = [], []
-    for gpu, machine in MACHINES.items():
-        measured = ROOT / 'measurements' / f'{gpu}.json'
-        if not measured.exists():
-            print(f'skip {gpu}: no {measured.name}')
-            continue
-        report = json.loads(measured.read_text())
-        for model, s in shapes.items():
-            entry = report['models'].get(model)
-            if entry is None:
+    for sub in ['vx', 'machines']:
+        (out / sub).mkdir(parents=True, exist_ok=True)
+    cells, summary, checks = [], [], {'bytes_compared': 0, 'bytes_mismatched': 0}
+    variants = {'vx_admit': 'fleet/admit.vx formula, fleet capacity', 'vx_fleet': 'exact weights, fleet capacity',
+                'vx_device': 'exact weights, device capacity', 'vx_reserve10': 'exact, device capacity, 10% engine reserve',
+                'vx_reserve5': 'exact, device capacity, 5% engine reserve'}
+    truths = {'vllm_090': 0.9, 'vllm_095': 0.95}
+    for gpu, fleet in MACHINES.items():
+        runs = launches(gpu)
+        # What CUDA reports as allocatable on this GPU type; nvidia-smi's larger total includes memory the driver keeps.
+        totals = [l['total_bytes'] for records in runs.values() for l in records if l.get('total_bytes')]
+        for model, records in runs.items():
+            s = shape(model)
+            short = [l for l in records if l['max_model_len'] == 4096 and not l.get('long_prompt')]
+            by_util = {u: [l for l in short if l['util'] == u] for u in sorted({l['util'] for l in short})}
+            if 0.9 not in by_util:
                 continue
-            short = entry['launches'][0]
-            loaded, kv_tokens = short['loaded'], short.get('kv_tokens', 0) if short['loaded'] else 0
-            kv_per_token = 2 * s['layers'] * s['kv_heads'] * s['head_dim'] * 2
-            capacity = 80 * 2**30
-            implied = max(0, (capacity - s['weight_bytes']) // (kv_per_token + 2 * s['d']))
-            summary.append({'gpu': gpu, 'model': model, 'weight_bytes': s['weight_bytes'], 'vllm_loaded': loaded,
-                            'vllm_kv_tokens': kv_tokens, 'vllm_weights_gib': short.get('weights_gib'), 'vllm_kv_gib': short.get('kv_gib'),
-                            'vx_implied_tokens': implied, 'device_total_bytes': short.get('total_bytes'),
-                            'native_launch': [(l['max_model_len'], l['loaded']) for l in entry['launches'][1:]]})
+            device = totals[0] if totals else records[0]['smi_bytes']
+            fleet_bytes = int(re.search(r'Memory HBM \{\s*capacity: ([\d.]+) GiB', (vx / fleet).read_text()).group(1)) * 2**30
+            name = model.split('/')[1]
+            device_file, patched = machine_file(vx, fleet, device, out / 'machines' / f'{gpu}-device.vx')
+            fleet_file, _ = machine_file(vx, fleet, None, out / 'machines' / f'{gpu}-fleet.vx')
+            summary.append({'gpu': gpu, 'model': name, 'fleet_bytes': fleet_bytes, 'return_edge_added': patched, 'device_bytes': device, 'weight_bytes': s['weight_bytes'],
+                            'kv_bytes_per_token': 2 * s['layers'] * s['kv_heads'] * s['head_dim'] * 2,
+                            'kv_tokens': {u: [l.get('kv_tokens') if l['loaded'] else None for l in runs] for u, runs in by_util.items()},
+                            'other_gib': {u: [round(u * device / 2**30 - l['weights_gib'] - l['kv_gib'], 2) for l in runs if l['loaded'] and l.get('kv_gib')]
+                                          for u, runs in by_util.items()},
+                            'native': [{'util': l['util'], 'ran': l['loaded'], 'prompt_tokens': l.get('prompt_tokens'),
+                                        'refused_at': l.get('estimated_max_len')} for l in records if l['max_model_len'] == 32768]})
             for context in CONTEXTS:
                 for batch in BATCHES:
-                    tag = f"{gpu}-{model.split('/')[1]}-{context}-{batch}"
-                    exact, exact_bytes = admit(vx, machine, exact_program(s, context, batch), out / 'vx' / f'{tag}-exact.vx')
-                    ref, ref_bytes = admit(vx, machine, reference_program(vx, s, context, batch), out / 'vx' / f'{tag}-admit.vx')
-                    fits = loaded and context <= s['native_context'] and batch * context <= kv_tokens
-                    cells.append({'gpu': gpu, 'model': model, 'context': context, 'batch': batch, 'vllm_fits': fits,
-                                  'vx_exact': exact, 'vx_exact_bytes': exact_bytes, 'vx_admit': ref, 'vx_admit_bytes': ref_bytes})
+                    tag = f'{gpu}-{name}-{context}-{batch}'
+                    tensors = residents(s, context, batch)
+                    expected = sum(a * b * 2 for _, (a, b) in tensors)
+                    cell = {'gpu': gpu, 'model': name, 'context': context, 'batch': batch, 'resident_bytes': expected}
+                    for truth, util in truths.items():
+                        cell[truth] = fits(by_util[util], context, batch, s['native_context']) if util in by_util else None
+                    cell['vx_fleet'], used = admit(vx, fleet_file, exact_program(tensors), out / 'vx' / f'{tag}-fleet.vx')
+                    if cell['vx_fleet']:
+                        checks['bytes_compared'] += 1
+                        checks['bytes_mismatched'] += used != expected
+                    cell['vx_device'], _ = admit(vx, device_file, exact_program(tensors), out / 'vx' / f'{tag}-device.vx')
+                    for key, share in [('vx_reserve10', 0.10), ('vx_reserve5', 0.05)]:
+                        program = exact_program(residents(s, context, batch, round(share * device)))
+                        cell[key], _ = admit(vx, device_file, program, out / 'vx' / f'{tag}-{key}.vx')
+                    cell['vx_admit'], _ = admit(vx, fleet_file, reference_program(vx, s, context, batch), out / 'vx' / f'{tag}-admit.vx')
+                    cells.append(cell)
     if not cells:
         sys.exit('No measurements yet; run measure first.')
-    count = lambda key, want, truth: sum(c[key] == want and c['vllm_fits'] == truth for c in cells)
-    scores = {key: {'agree': count(key, True, True) + count(key, False, False), 'false_accept': count(key, True, False),
-                    'false_reject': count(key, False, True), 'cells': len(cells)} for key in ['vx_exact', 'vx_admit']}
-    (out / 'fit.json').write_text(json.dumps({'vllm': VLLM, 'scores': scores, 'models': summary, 'cells': cells}, indent=1) + '\n')
+
+    def score(key, truth):
+        subset = [c for c in cells if c[truth] is not None]
+        return {'agree': sum(c[key] == c[truth] for c in subset), 'false_accept': sum(c[key] and not c[truth] for c in subset),
+                'false_reject': sum(c[truth] and not c[key] for c in subset), 'cells': len(subset),
+                'false_accepts': [f"{c['gpu']} {c['model']} {c['context']}x{c['batch']}" for c in subset if c[key] and not c[truth]],
+                'false_rejects': [f"{c['gpu']} {c['model']} {c['context']}x{c['batch']}" for c in subset if c[truth] and not c[key]]}
+    scores = {key: {truth: score(key, truth) for truth in truths} for key in variants}
+    (out / 'fit.json').write_text(json.dumps({'vllm': VLLM, 'checks': checks, 'scores': scores, 'models': summary, 'cells': cells}, indent=1) + '\n')
     gib = lambda b: f'{b / 2**30:.1f}'
-    # vLLM budgets 90% of the device; whatever is neither weights nor KV cache is its runtime overhead.
-    other = lambda m: 0.9 * m['device_total_bytes'] / 2**30 - m['vllm_weights_gib'] - m['vllm_kv_gib']
-    lines = ['| GPU | Model | device GiB | weights GiB | KV GiB | other GiB | vLLM KV tokens | Vx implied tokens |',
-             '|---|---|---:|---:|---:|---:|---:|---:|']
-    lines += [f"| {m['gpu']} | {m['model'].split('/')[1]} | {gib(m['device_total_bytes'])} | {m['vllm_weights_gib']:.1f} | "
-              f"{m['vllm_kv_gib']:.1f} | {other(m):.1f} | {m['vllm_kv_tokens']:,.0f} | {m['vx_implied_tokens']:,} |" for m in summary]
-    lines += ['', '| Vx program | agree | false accept | false reject | cells |', '|---|---:|---:|---:|---:|']
-    lines += [f"| {k} | {v['agree']} | {v['false_accept']} | {v['false_reject']} | {v['cells']} |" for k, v in scores.items()]
-    lines += ['', '| GPU | Model | context | batch | vLLM | Vx exact | Vx admit.vx |', '|---|---|---:|---:|---|---|---|']
-    mark = lambda ok: 'fits' if ok else '—'
-    lines += [f"| {c['gpu']} | {c['model'].split('/')[1]} | {c['context']} | {c['batch']} | {mark(c['vllm_fits'])} | "
-              f"{mark(c['vx_exact'])} | {mark(c['vx_admit'])} |" for c in cells if c['vllm_fits'] != c['vx_exact'] or c['vllm_fits'] != c['vx_admit']]
+    fmt = lambda v: f"{v['agree']}/{v['cells']} · {v['false_accept']} FA · {v['false_reject']} FR"
+    lines = [f"Vx resident bytes equal the arithmetic sum in {checks['bytes_compared'] - checks['bytes_mismatched']} of {checks['bytes_compared']} admitted cells.", '',
+             '| Vx program | vs vLLM util 0.90 (default) | vs vLLM util 0.95 |', '|---|---|---|']
+    lines += [f"| {label} | {fmt(scores[k]['vllm_090'])} | {fmt(scores[k]['vllm_095'])} |" for k, label in variants.items()]
+    tokens = lambda runs: ' / '.join(f'{t:,.0f}' if t else 'fails' for t in runs)
+    lines += ['', '| GPU | Model | fleet GiB | device GiB | weights GiB | KV tokens 0.90 (runs) | KV tokens 0.95 | other GiB 0.90 (runs) | 32k prompt |',
+              '|---|---|---:|---:|---:|---|---|---|---|']
+    for m in summary:
+        native = ', '.join(f"{n['util']}: {'ran ' + format(n['prompt_tokens'], ',') if n['ran'] else 'refused' if n['refused_at'] else 'OOM'}" for n in m['native'])
+        lines.append(f"| {m['gpu']} | {m['model'].replace('-Instruct', '')} | {gib(m['fleet_bytes'])} | {gib(m['device_bytes'])} | {gib(m['weight_bytes'])} | "
+                     f"{tokens(m['kv_tokens'][0.9])} | {tokens(m['kv_tokens'].get(0.95, [])) or '—'} | "
+                     f"{' / '.join(map(str, m['other_gib'][0.9])) or '—'} | {native} |")
     (out / 'fit.md').write_text('\n'.join(lines) + '\n')
     print('\n'.join(lines))
 
@@ -158,7 +221,10 @@ parser = argparse.ArgumentParser()
 sub = parser.add_subparsers(dest='command', required=True)
 m = sub.add_parser('measure', help='rent one GPU through Fission and run guest.py')
 m.add_argument('gpu', help=f'Modal GPU type; tables use {", ".join(MACHINES)}')
-m.add_argument('--models', nargs='+', default=MODELS)
+m.add_argument('--models', nargs='+', default=MODELS[:3])
+m.add_argument('--utils', nargs='+', type=float, default=[DEFAULT_UTIL])
+m.add_argument('--tag', default='', help='suffix for the measurement file, such as --tag=-sweep')
+m.add_argument('--attention-backend', default='', help='vLLM attention backend override, such as TRITON_ATTN')
 m.add_argument('--duration', default='75m')
 m.add_argument('--work', default='55m')
 m.add_argument('--budget', default='6')
