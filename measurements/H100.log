@@ -1,0 +1,4 @@
+
+[notice] A new release of pip is available: 25.0.1 -> 26.2.1
+[notice] To update, run: pip install --upgrade pip
+{"Qwen/Qwen2.5-7B-Instruct": [[4096, true, 1024816.0]], "Qwen/Qwen2.5-14B-Instruct": [[4096, true, 224928.0]], "Qwen/Qwen2.5-32B-Instruct": [[4096, true, 25744.0], [32768, false, null]]}

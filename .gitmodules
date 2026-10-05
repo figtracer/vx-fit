@@ -1,0 +1,3 @@
+[submodule "Vx"]
+	path = Vx
+	url = https://github.com/vx-lang/Vx
