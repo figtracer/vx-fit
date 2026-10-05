@@ -41,14 +41,6 @@ Filed upstream: [#1202](https://github.com/vx-lang/Vx/issues/1202), [#1203](http
 [#1204](https://github.com/vx-lang/Vx/issues/1204), [#1205](https://github.com/vx-lang/Vx/issues/1205),
 [#1206](https://github.com/vx-lang/Vx/issues/1206). Pilot data for Vx's planned campaign: [#289](https://github.com/vx-lang/Vx/issues/289#issuecomment-5997744142).
 
-## What this says about Vx
-
-A calculator gives the same fit number, so the arithmetic isn't where Vx earns its keep. Vx is useful because the
-check is attached to the code: it is computed from the program's own tensor types, re-runs on every change, and
-follows lifetimes, calls and memory spaces that a calculator never sees. It is a static check, not a proof, and it
-is only as accurate as its machine files. Serving an LLM is the case where Vx adds least. Kernel tiles in on-chip
-memory and multi-stage pipelines are where it should add most.
-
 ## Run
 
 Requires Rust, LLVM 22, Z3, CMake and Python 3.10+. New GPU measurements also need
